@@ -1,0 +1,26 @@
+# Gazebo Transport -> ROS 2 bridges for the mounted RGB-D camera.
+# The Gazebo sensor topic prefix is `camera`, so Gazebo publishes
+# /camera/image, /camera/depth_image, and /camera/camera_info.
+- ros_topic_name: /camera/image_raw
+  gz_topic_name: /camera/image
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+  qos_profile: SENSOR_DATA
+  frame_id: camera_optical_frame
+
+- ros_topic_name: /camera/depth_image_raw
+  gz_topic_name: /camera/depth_image
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+  qos_profile: SENSOR_DATA
+  frame_id: camera_optical_frame
+
+- ros_topic_name: /camera/camera_info
+  gz_topic_name: /camera/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+  qos_profile: SENSOR_DATA
+  frame_id: camera_optical_frame
