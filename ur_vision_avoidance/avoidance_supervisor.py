@@ -15,6 +15,7 @@ from typing import Optional
 import rclpy
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32
@@ -63,7 +64,12 @@ class AvoidanceSupervisor(Node):
         self.latest_joint_state_time = self.get_clock().now()
         self.latest_lateral = 0.0
         self.obstacle_active = False
-        self.last_command_time = self.get_clock().now()
+        # Permit the first valid obstacle request immediately. Initializing
+        # this to ``now`` would suppress the first retreat for the full rate
+        # limit interval after node startup.
+        self.last_command_time = self.get_clock().now() - Duration(
+            seconds=self.min_command_interval_s
+        )
         self.goal_in_progress = False
 
         self.action_client = ActionClient(

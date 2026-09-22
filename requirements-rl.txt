@@ -1,0 +1,3 @@
+# Optional fixed-scene RL starter dependencies.
+gymnasium>=0.29,<1.1
+stable-baselines3>=2.3,<3.0

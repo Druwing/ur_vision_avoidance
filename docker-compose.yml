@@ -1,0 +1,33 @@
+services:
+  ros2jazzy-gazebo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ur-vision-avoidance
+    network_mode: host
+    privileged: true
+    init: true
+    working_dir: /ros2_ws
+    environment:
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+      XDG_RUNTIME_DIR: /tmp
+      ROS_DOMAIN_ID: "0"
+      ROS_LOCALHOST_ONLY: "0"
+      LIBGL_ALWAYS_SOFTWARE: "0"
+      HOME: /root
+    volumes:
+      - .:/ros2_ws/src/ur_vision_avoidance
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /dev:/dev
+      - /tmp:/tmp
+    stdin_open: true
+    tty: true
+    command: >
+      bash -lc "source /opt/ros/jazzy/setup.bash && \
+      cd /ros2_ws && \
+      colcon build --symlink-install && \
+      source install/setup.bash && \
+      echo 'ROS environment ready. Launch with:' && \
+      echo '  ros2 launch ur_vision_avoidance vision_bringup.launch.py' && \
+      bash"

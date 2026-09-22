@@ -1,10 +1,10 @@
 <?xml version="1.0"?>
-<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="ur">
   <xacro:arg name="name" default="ur"/>
   <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
   <xacro:include filename="$(find ur_simulation_gz)/urdf/ur_gz.ros2_control.xacro"/>
 
-  <xacro:arg name="ur_type" default="ur5x"/>
+  <xacro:arg name="ur_type" default="ur5e"/>
   <xacro:arg name="tf_prefix" default=""/>
   <xacro:arg name="joint_limit_params" default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
   <xacro:arg name="kinematics_params" default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>

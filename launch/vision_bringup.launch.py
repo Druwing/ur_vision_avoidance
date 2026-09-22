@@ -130,10 +130,13 @@ def generate_launch_description():
     ur_type = LaunchConfiguration("ur_type")
     model = LaunchConfiguration("model")
     enable_avoidance = LaunchConfiguration("enable_avoidance")
+    enable_rl_starter = LaunchConfiguration("enable_rl_starter")
+    rl_model = LaunchConfiguration("rl_model")
 
     custom_description = PathJoinSubstitution(
         [package_share, "urdf", "ur_gz_camera.urdf.xacro"]
     )
+    bundled_model = PathJoinSubstitution([package_share, "models", "yolo26n.pt"])
     world_file = PathJoinSubstitution([package_share, "worlds", "obstacle_world.sdf"])
     bridge_config = PathJoinSubstitution([package_share, "config", "bridge.yaml"])
     return LaunchDescription(
@@ -145,13 +148,23 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "model",
-                default_value="yolo26n.pt",
+                default_value=bundled_model,
                 description="Ultralytics checkpoint or path to a custom best.pt.",
             ),
             DeclareLaunchArgument(
                 "enable_avoidance",
                 default_value="false",
                 description="Enable the simulation-only retreat supervisor.",
+            ),
+            DeclareLaunchArgument(
+                "enable_rl_starter",
+                default_value="false",
+                description="Enable fixed-scene RL observation/action nodes; ARD is disabled.",
+            ),
+            DeclareLaunchArgument(
+                "rl_model",
+                default_value="",
+                description="Path to a fixed-scene PPO .zip policy; empty publishes zero actions.",
             ),
             DeclareLaunchArgument("description_file", default_value=custom_description),
             DeclareLaunchArgument(
@@ -203,6 +216,22 @@ def generate_launch_description():
                 output="screen",
                 condition=IfCondition(enable_avoidance),
                 parameters=[{"use_sim_time": True}],
+            ),
+            Node(
+                package="ur_vision_avoidance",
+                executable="rl_observation_node",
+                name="rl_observation_adapter",
+                output="screen",
+                condition=IfCondition(enable_rl_starter),
+                parameters=[{"use_sim_time": True}],
+            ),
+            Node(
+                package="ur_vision_avoidance",
+                executable="rl_policy_node",
+                name="rl_policy_node",
+                output="screen",
+                condition=IfCondition(enable_rl_starter),
+                parameters=[{"use_sim_time": True}, {"model_path": rl_model}],
             ),
         ]
     )

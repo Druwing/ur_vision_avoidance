@@ -170,6 +170,7 @@ class VisionNode(Node):
                     "class": label,
                     "confidence": round(float(confidence), 4),
                     "bbox_xyxy": [round(v, 1) for v in (x1, y1, x2, y2)],
+                    "lateral_offset": round(float(lateral_offset), 4),
                     "distance_m": None if not math.isfinite(distance_m) else round(distance_m, 3),
                     "in_path": bool(in_path),
                     "close": bool(is_close),
