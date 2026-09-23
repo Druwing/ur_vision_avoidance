@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     ros-jazzy-ros-gz \
     ros-jazzy-rqt-image-view \
     ros-jazzy-ros2-control \
+    ros-jazzy-gz-ros2-control \
     ros-jazzy-ros2-controllers \
     ros-jazzy-ur \
     ros-jazzy-xacro \

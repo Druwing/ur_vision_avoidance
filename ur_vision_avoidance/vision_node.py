@@ -204,12 +204,7 @@ class VisionNode(Node):
             )
         )
 
-        try:
-            output_message = self.bridge.cv2_to_imgmsg(annotated, encoding="bgr8")
-            output_message.header = message.header
-            self.image_pub.publish(output_message)
-        except CvBridgeError as exc:
-            self.get_logger().error(f"Could not publish annotated image: {exc}")
+        self._publish_annotated_image(annotated, message)
 
         if self.latest_depth is None and not self.warned_no_depth:
             self.get_logger().warn(
@@ -217,6 +212,39 @@ class VisionNode(Node):
                 "2-D debugging; RGB alone does not provide reliable range."
             )
             self.warned_no_depth = True
+
+    def _publish_annotated_image(self, annotated: np.ndarray, source: Image) -> None:
+        """Publish an annotated image without relying on cv_bridge's type map.
+
+        Some ROS/cv_bridge builds expose a NumPy-version-dependent encoding map
+        that can raise ``KeyError: 16`` for an otherwise valid ``bgr8`` image.
+        Constructing the sensor message directly is equivalent for an 8-bit
+        contiguous image and keeps a visualization failure from killing the
+        detection callback.
+        """
+        try:
+            array = np.asarray(annotated)
+            if array.ndim == 2:
+                encoding = "mono8"
+            elif array.ndim == 3 and array.shape[2] == 3:
+                encoding = "bgr8"
+            else:
+                raise ValueError(f"unsupported annotated image shape: {array.shape}")
+            if array.dtype != np.uint8:
+                array = np.clip(array, 0, 255).astype(np.uint8)
+            array = np.ascontiguousarray(array)
+
+            output_message = Image()
+            output_message.header = source.header
+            output_message.height = int(array.shape[0])
+            output_message.width = int(array.shape[1])
+            output_message.encoding = encoding
+            output_message.is_bigendian = 0
+            output_message.step = int(array.strides[0])
+            output_message.data = array.tobytes()
+            self.image_pub.publish(output_message)
+        except Exception as exc:  # Keep perception topics alive if visualization fails.
+            self.get_logger().error(f"Could not publish annotated image: {exc}")
 
     @staticmethod
     def _estimate_depth(
