@@ -25,6 +25,7 @@ setup(
         "console_scripts": [
             "vision_node = ur_vision_avoidance.vision_node:main",
             "avoidance_supervisor = ur_vision_avoidance.avoidance_supervisor:main",
+            "motion_loop = ur_vision_avoidance.motion_loop:main",
             "rl_observation_node = ur_vision_avoidance.rl_observation_node:main",
             "rl_policy_node = ur_vision_avoidance.rl_policy_node:main",
             "train_fixed_scene = ur_vision_avoidance.train_fixed_scene:main",
