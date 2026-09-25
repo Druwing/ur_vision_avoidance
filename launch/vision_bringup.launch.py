@@ -33,6 +33,7 @@ def launch_simulation(context, *args, **kwargs):
     gazebo_gui = LaunchConfiguration("gazebo_gui")
     world_file = LaunchConfiguration("world_file")
     activate_joint_controller = LaunchConfiguration("activate_joint_controller")
+    enable_motion_loop = LaunchConfiguration("enable_motion_loop")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
 
     robot_description_content = Command(
@@ -132,6 +133,7 @@ def generate_launch_description():
     enable_avoidance = LaunchConfiguration("enable_avoidance")
     enable_rl_starter = LaunchConfiguration("enable_rl_starter")
     rl_model = LaunchConfiguration("rl_model")
+    enable_motion_loop = LaunchConfiguration("enable_motion_loop")
 
     custom_description = PathJoinSubstitution(
         [package_share, "urdf", "ur_gz_camera.urdf.xacro"]
@@ -165,6 +167,11 @@ def generate_launch_description():
                 "rl_model",
                 default_value="",
                 description="Path to a fixed-scene PPO .zip policy; empty publishes zero actions.",
+            ),
+            DeclareLaunchArgument(
+                "enable_motion_loop",
+                default_value="false",
+                description="Enable the fixed-waypoint simulation motion loop.",
             ),
             DeclareLaunchArgument("description_file", default_value=custom_description),
             DeclareLaunchArgument(
@@ -215,7 +222,10 @@ def generate_launch_description():
                 name="avoidance_supervisor",
                 output="screen",
                 condition=IfCondition(enable_avoidance),
-                parameters=[{"use_sim_time": True}],
+                parameters=[
+                    {"use_sim_time": True},
+                    {"enable_avoidance": enable_avoidance},
+                ],
             ),
             Node(
                 package="ur_vision_avoidance",
@@ -232,6 +242,14 @@ def generate_launch_description():
                 output="screen",
                 condition=IfCondition(enable_rl_starter),
                 parameters=[{"use_sim_time": True}, {"model_path": rl_model}],
+            ),
+            Node(
+                package="ur_vision_avoidance",
+                executable="motion_loop",
+                name="motion_loop",
+                output="screen",
+                condition=IfCondition(enable_motion_loop),
+                parameters=[{"use_sim_time": True}],
             ),
         ]
     )

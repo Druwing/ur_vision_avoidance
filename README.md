@@ -14,24 +14,24 @@ The process is divided into simulation, transport, perception, and optional comm
 
 ```mermaid
 flowchart LR
-    A[Gazebo Harmonic\nUR5e + camera + obstacles] --> B[Gazebo camera topics\n/camera/image\n/camera/depth_image]
-    B --> C[ros_gz_bridge\nconfig/bridge.yaml]
-    C --> D[ROS 2 RGB-D topics\n/camera/image_raw\n/camera/depth_image_raw]
-    D --> E[vision_node\nYOLO + depth sampling]
-    E --> F[/vision/annotated]
-    E --> G[/vision/detections]
-    E --> H[/obstacle/stop]
-    E --> I[/obstacle/nearest_distance]
-    E --> J[/obstacle/lateral_offset]
-    H --> K[avoidance_supervisor\noptional, disabled by default]
+    A["Gazebo Harmonic: UR5e, camera, obstacles"] --> B["Gazebo camera topics: camera image and depth"]
+    B --> C["ros_gz_bridge: config/bridge.yaml"]
+    C --> D["ROS 2 RGB-D topics: camera image and depth"]
+    D --> E["vision_node: YOLO and depth sampling"]
+    E --> F["/vision/annotated"]
+    E --> G["/vision/detections"]
+    E --> H["/obstacle/stop"]
+    E --> I["/obstacle/nearest_distance"]
+    E --> J["/obstacle/lateral_offset"]
+    H --> K["avoidance_supervisor: optional and disabled by default"]
     J --> K
-    L[/joint_states/] --> K
-    K --> M[FollowJointTrajectory action\nscaled_joint_trajectory_controller]
+    L["/joint_states"] --> K
+    K --> M["FollowJointTrajectory: scaled joint trajectory controller"]
     M --> A
-    E --> N[rl_observation_node\nstructured JSON state]
+    E --> N["rl_observation_node: structured JSON state"]
     L --> N
-    N --> O[rl_policy_node\noptional PPO inference]
-    O --> P[/rl/action\nbounded velocity offset]
+    N --> O["rl_policy_node: optional PPO inference"]
+    O --> P["/rl/action: bounded velocity offset"]
 ```
 
 ### Components
@@ -43,6 +43,7 @@ flowchart LR
 | `config/bridge.yaml` | Bridges Gazebo RGB, depth, and camera-info topics into ROS 2. |
 | `vision_node` | Runs YOLO on each RGB frame, samples a depth patch at each detection center, and publishes detection and obstacle topics. |
 | `avoidance_supervisor` | Listens for an obstacle request and, only when explicitly enabled, sends one bounded shoulder-pan trajectory to the simulated controller. |
+| `motion_loop` | Optional fixed-waypoint simulation loop that continuously sends trajectories and pauses on `/obstacle/stop`. |
 | `fixed_scene_env.py` | Provides a deterministic Gymnasium training environment for one fixed obstacle and one nominal path. ARD is disabled. |
 | `train_fixed_scene.py` | Trains an optional PPO policy against the fixed-scene environment. |
 | `rl_observation_node` | Combines detections and joint state into a versioned JSON observation topic. |
@@ -60,6 +61,29 @@ The supervisor is disabled by default. When enabled, it reacts to a rising edge 
 
 The RL starter is also disabled by default. When enabled, the observation adapter publishes `/rl/observation` and the optional policy node publishes `/rl/action`. The action is an interface artifact for the starter stage; it is not connected to the UR controller. ARD is not used by the training environment, configuration, or launch mode.
 
+## Continuous starter motion loop
+
+The original deterministic supervisor sends one retreat after an obstacle rising edge. If you need the simulated robot to move continuously by itself while testing the perception loop, enable the separate fixed-waypoint motion loop:
+
+```bash
+ros2 launch ur_vision_avoidance vision_bringup.launch.py \
+  enable_avoidance:=true \
+  enable_motion_loop:=true
+```
+
+The loop cycles through four conservative joint waypoints using the `scaled_joint_trajectory_controller`. It pauses and cancels its active trajectory when `/obstacle/stop` becomes `true`, and resumes at the next waypoint after the obstacle clears. This lets you observe the sequence `motion → detection → stop → supervisor retreat → obstacle clear → motion resume`.
+
+Monitor the loop in separate terminals:
+
+```bash
+ros2 topic echo /vision/detections std_msgs/msg/String
+ros2 topic echo /obstacle/stop std_msgs/msg/Bool
+ros2 topic echo /avoidance/command trajectory_msgs/msg/JointTrajectory
+ros2 topic echo /joint_states sensor_msgs/msg/JointState
+```
+
+The motion loop logs messages such as `sending waypoint`, `Obstacle active: pausing motion loop`, and `Obstacle cleared: resuming motion loop`. The loop is intentionally simulation-only. It is not a collision planner, does not consume RL actions, and must not be used on a physical UR5e.
+
 ## Prerequisites
 
 A full runtime requires the following environment:
@@ -72,6 +96,57 @@ A full runtime requires the following environment:
 - A graphical display for Gazebo GUI and RViz, unless headless mode is selected.
 
 The included Dockerfile installs the ROS packages and Ultralytics. Docker and Docker Compose are optional if the dependencies are already installed on the host.
+
+### Python environment compatibility
+
+ROS 2 console scripts must be able to import Ultralytics, `cv_bridge`, OpenCV, and NumPy from the same Python environment. A common failure is installing Ultralytics only inside `/opt/venvs/ros` and then running `ros2 run`, whose generated console script uses the system ROS Python. The node then fails before creating its publishers with:
+
+```text
+ModuleNotFoundError: No module named 'ultralytics'
+```
+
+Check the interpreter and imports from the same shell used to launch ROS:
+
+```bash
+which python3
+python3 -c "import sys; print(sys.executable)"
+python3 -c "from ultralytics import YOLO; print('Ultralytics OK')"
+python3 -c "import cv_bridge; print('cv_bridge OK')"
+```
+
+If Ultralytics is installed in the virtual environment, source it before building and running:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /opt/venvs/ros/bin/activate
+source /ros2_ws/install/setup.bash
+```
+
+For a ROS container, install the package in the interpreter used by the ROS node, or expose the virtual-environment site-packages explicitly. Do not assume that activating a virtual environment in one terminal changes an already-running launch process.
+
+### NumPy and `cv_bridge` compatibility
+
+The ROS Jazzy `cv_bridge` binary may be compiled against NumPy 1.x. If the Ultralytics virtual environment installs NumPy 2.x, image conversion can emit this warning and later crash:
+
+```text
+A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x
+```
+
+The recommended compatibility fix for this project is:
+
+```bash
+/opt/venvs/ros/bin/python -m pip install --force-reinstall numpy==1.26.4
+```
+
+Verify both interpreters before launching:
+
+```bash
+/opt/venvs/ros/bin/python -c "import numpy; print(numpy.__version__)"
+python3 -c "import numpy; print(numpy.__version__)"
+python3 -c "import cv_bridge; print('cv_bridge OK')"
+```
+
+They should report NumPy `1.26.4` or another NumPy 1.x version compatible with the installed ROS bridge. Pip may report that a newer `opencv-python` package prefers NumPy 2.x; for this ROS image pipeline, a coherent ROS/cv_bridge/NumPy 1.x environment is more important than mixing incompatible binary wheels. Pin the compatible versions in the Dockerfile or requirements used to build the image so the fix survives container recreation.
 
 ## Installation with Docker
 
@@ -245,6 +320,61 @@ ros2 run ur_vision_avoidance vision_node --ros-args \
 
 A custom detector should be trained for the actual objects and camera viewpoint used in the experiment. A generic COCO checkpoint is suitable for pipeline testing, but it does not establish reliable obstacle coverage.
 
+## YOLO model comparison and selection
+
+The repository bundles `yolo26n.pt` as a **starter checkpoint**. The table below is a practical project comparison, not a substitute for benchmarking on the target camera and hardware. Larger models generally improve difficult or unusual detections but increase inference latency and memory use.
+
+| Model family | Relative accuracy | Relative speed and memory | Best use in this project | Main trade-off |
+|---|---|---|---|---|
+| `yolo26n.pt` | Lowest in the family, but often adequate for clear COCO objects | Fastest and lightest | First ROS/Gazebo integration, CPU testing, low-latency perception, fixed-scene experiments | Can miss cropped, unusual, occluded, or low-resolution chairs and obstacles |
+| `yolo26s.pt` | Higher than `n` | Still suitable for near-real-time testing, but heavier | Better default candidate when the Nano model misses the chair and latency remains acceptable | More compute and latency; still not trained for project-specific obstacles |
+| `yolo26m.pt` | Higher again | Medium-to-heavy | More difficult viewpoints and higher-quality offline evaluation | Greater CPU/GPU demand and control latency |
+| `yolo26l.pt` | High | Heavy | Accuracy-focused simulation evaluation or GPU deployment | Usually excessive for a small embedded/ROS starter loop |
+| `yolo26x.pt` | Highest capacity in the family | Heaviest and slowest | Offline comparison or powerful GPU experiments | Highest latency, memory use, and integration cost |
+| YOLOv11n/s/m/l/x | Mature high-accuracy baseline with broad tooling | Nano/small variants are efficient; larger variants are heavier | Existing projects, established Ultralytics pipelines, and comparison against the current generation | Older generation; final accuracy and latency depend on the exact checkpoint and runtime |
+| YOLOv8n/s/m/l/x | Mature and widely used baseline | Nano/small variants are relatively light; larger variants cost more | Reproducing older research, existing datasets, or known deployment pipelines | Older generation and may be less capable on difficult views than newer equivalents |
+| YOLOv5n/s/m/l/x | Very mature baseline; still useful for legacy systems | Generally efficient, especially nano/small variants | Legacy ROS integrations, older exported ONNX/TensorRT pipelines, and compatibility testing | Older architecture, older export/runtime assumptions, and less convenient as a new project baseline |
+| Custom fine-tuned model | Depends on dataset and validation | Depends on model size | Final project objects, camera viewpoint, and workspace-specific obstacle classes | Requires labeled images, training, validation, and domain coverage |
+
+### Why `yolo26n.pt` is the best starter option
+
+`yolo26n.pt` is the best **initial engineering choice**, not necessarily the most accurate final model:
+
+1. **Low latency:** obstacle avoidance needs fresh observations. A larger model can improve recognition while making the command loop slower and increasing sensor-to-command delay.
+2. **Low resource use:** it is more likely to run acceptably alongside Gazebo, ROS 2, `cv_bridge`, RViz, and the controller on a CPU-only SteamOS/container setup.
+3. **Fast iteration:** model loading and per-frame inference are cheap enough for repeated camera, threshold, depth, and launch tests.
+4. **Simple baseline:** it provides a reproducible baseline before changing both the model and the rest of the perception pipeline.
+5. **Sufficient for clear benchmark objects:** it can detect standard COCO classes such as `chair` when the object is visible at a useful scale and viewpoint.
+
+`yolo26n.pt` should be replaced or supplemented when validation shows missed detections, especially for partial chair views, unusual camera angles, transparent objects, thin structures, or project-specific geometric obstacles. Compare `yolo26s.pt` or `yolo26m.pt` using the same recorded images and measure precision, recall, inference time, end-to-end latency, and false-stop rate. A custom fine-tuned checkpoint is the correct long-term solution for the actual obstacle set; a larger generic model is not automatically safer.
+
+### Older-version selection guidance
+
+Older YOLO versions can still be valid choices. Prefer **YOLOv5** when an existing deployment depends on its export format or legacy inference code; prefer **YOLOv8** when reproducing a project or dataset built around that generation; and consider **YOLOv11** as a strong mature comparison baseline when the available weights, documentation, or hardware tooling are better than for the current checkpoint. Do not compare only the model name: use the same image stream, input size, confidence threshold, device, and post-processing rules.
+
+For this repository, the practical order is:
+
+1. Start with `yolo26n.pt` to validate ROS topics, depth sampling, controller latency, and the motion loop.
+2. Compare `yolo11n.pt` or `yolo8n.pt` if an older, well-supported checkpoint is already available in your environment.
+3. Try `yolo26s.pt`, `yolo11s.pt`, or `yolo8s.pt` if the Nano model misses the chair and the measured latency remains acceptable.
+4. Fine-tune a project-specific model when the target objects or viewpoints are not represented well by generic COCO weights.
+
+Model generations are not automatically interchangeable. Check the Ultralytics version, checkpoint task type, class names, image preprocessing, export format, and licensing/provenance before swapping weights. Rebuild or reinstall the runtime only when required by the checkpoint; keep the ROS `cv_bridge` and NumPy compatibility fix independent of the YOLO model comparison.
+
+Example model comparison commands:
+
+```bash
+# Use the bundled baseline
+ros2 launch ur_vision_avoidance vision_bringup.launch.py \
+  model:=/absolute/path/to/yolo26n.pt
+
+# Compare a larger checkpoint on the same camera stream
+ros2 launch ur_vision_avoidance vision_bringup.launch.py \
+  model:=/absolute/path/to/yolo26s.pt
+```
+
+Record `/camera/image_raw` and `/vision/detections` for each model, then compare the same frames. Do not select a model only by visual confidence; include missed obstacles, false detections, depth validity, and time from image timestamp to obstacle command.
+
 ## Fixed-scene reinforcement-learning starter
 
 The current RL stage intentionally uses one deterministic kinematic scene. It is a starter interface for testing observation construction, action dimensions, reward behavior, and PPO training before augmented randomized domain is introduced. It does not model full Gazebo dynamics and it does not send actions to the physical or simulated UR controller.
@@ -329,6 +459,8 @@ Also confirm that the model path exists and that the Ultralytics checkpoint load
 
 The bundled model is a general pretrained checkpoint. It may not recognize the blue geometric box in the sample world because `box` is not a standard COCO object class. Test first with the chair, lower the confidence threshold temporarily, and inspect `/vision/annotated`. For a real experiment, train a custom checkpoint using images from the mounted camera and the expected workspace.
 
+If the node fails before `/vision/detections` exists, check the Python environment first. `ModuleNotFoundError: No module named 'ultralytics'` usually means Ultralytics was installed in a virtual environment different from the interpreter used by the ROS console script. If the node starts but crashes during `imgmsg_to_cv2` or `cv2_to_imgmsg`, check the NumPy/cv_bridge compatibility procedure above and use NumPy 1.x with the ROS Jazzy bridge.
+
 ### Distance is `-1.0`
 
 Confirm that depth is publishing and inspect its encoding:
@@ -384,6 +516,7 @@ This repository is suitable for simulation and research integration. It is not s
 - `ur_vision_avoidance/train_fixed_scene.py`: fixed-scene PPO training command.
 - `ur_vision_avoidance/rl_observation_node.py`: structured ROS observation adapter.
 - `ur_vision_avoidance/rl_policy_node.py`: bounded PPO inference node that does not command the robot.
+- `ur_vision_avoidance/motion_loop.py`: fixed-waypoint continuous simulation loop with obstacle pause.
 - `urdf/ur_gz_camera.urdf.xacro`: UR5e plus camera description.
 - `worlds/obstacle_world.sdf`: Gazebo test world.
 - `config/bridge.yaml`: Gazebo-to-ROS topic bridge configuration.

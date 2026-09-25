@@ -15,7 +15,6 @@ from typing import Optional
 import rclpy
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
-from rclpy.duration import Duration
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32
@@ -67,9 +66,10 @@ class AvoidanceSupervisor(Node):
         # Permit the first valid obstacle request immediately. Initializing
         # this to ``now`` would suppress the first retreat for the full rate
         # limit interval after node startup.
-        self.last_command_time = self.get_clock().now() - Duration(
-            seconds=self.min_command_interval_s
-        )
+        # ROS simulation time can still be 0 at startup, so subtracting a
+        # duration from ``now`` would create an invalid negative Time. ``None``
+        # means that the first valid request is not rate-limited.
+        self.last_command_time = None
         self.goal_in_progress = False
 
         self.action_client = ActionClient(
@@ -139,7 +139,11 @@ class AvoidanceSupervisor(Node):
     def send_retreat_if_safe(self) -> None:
         """Send one small joint-space retreat using the current joint state."""
         now = self.get_clock().now()
-        since_last = (now - self.last_command_time).nanoseconds / 1e9
+        since_last = (
+            float("inf")
+            if self.last_command_time is None
+            else (now - self.last_command_time).nanoseconds / 1e9
+        )
         state_age = (now - self.latest_joint_state_time).nanoseconds / 1e9
         if self.goal_in_progress:
             self.get_logger().warn("A retreat goal is already in progress; ignoring trigger.")
