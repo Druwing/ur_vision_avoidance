@@ -31,12 +31,12 @@ RUN apt-get update && apt-get install -y \
     python3-numpy \
     python3-opencv \
     vim \
+    ros-jazzy-message-filters \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv --system-site-packages /opt/venvs/ros && \
     /opt/venvs/ros/bin/python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    /opt/venvs/ros/bin/python -m pip install --no-cache-dir ultralytics
-
+    /opt/venvs/ros/bin/python -m pip install --no-cache-dir "numpy==1.26.4" ultralytics
 RUN rosdep init || true
 
 WORKDIR /ros2_ws

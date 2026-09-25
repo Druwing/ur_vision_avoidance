@@ -25,6 +25,7 @@ services:
     tty: true
     command: >
       bash -lc "source /opt/ros/jazzy/setup.bash && \
+      source /opt/venvs/ros/bin/activate && \
       cd /ros2_ws && \
       colcon build --symlink-install && \
       source install/setup.bash && \

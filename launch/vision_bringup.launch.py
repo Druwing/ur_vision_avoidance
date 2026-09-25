@@ -180,6 +180,47 @@ def generate_launch_description():
                     [FindPackageShare("ur_simulation_gz"), "config", "ur_controllers.yaml"]
                 ),
             ),
+            DeclareLaunchArgument(
+                "confidence",
+                default_value="0.45",
+                description="YOLO confidence threshold.",
+            ),
+
+            DeclareLaunchArgument(
+                "stop_distance_m",
+                default_value="0.80",
+                description="Distance at or below which a detected obstacle requests STOP.",
+            ),
+
+            DeclareLaunchArgument(
+                "device",
+                default_value="",
+                description="Ultralytics device: empty=auto, cpu, 0, 1, ...",
+            ),
+
+            DeclareLaunchArgument(
+                "sync_slop_s",
+                default_value="0.08",
+                description="Maximum RGB/depth timestamp difference for pairing.",
+            ),
+
+            DeclareLaunchArgument(
+                "depth_roi_margin_ratio",
+                default_value="0.15",
+                description="Fraction removed from each depth ROI border.",
+            ),
+
+            DeclareLaunchArgument(
+                "depth_percentile",
+                default_value="25.0",
+                description="Depth percentile used inside each detection ROI.",
+            ),
+
+            DeclareLaunchArgument(
+                "min_path_overlap_ratio",
+                default_value="0.15",
+                description="Minimum bbox overlap with the path region.",
+            ),
             DeclareLaunchArgument("tf_prefix", default_value='""'),
             DeclareLaunchArgument("safety_limits", default_value="true"),
             DeclareLaunchArgument("safety_pos_margin", default_value="0.15"),
@@ -214,6 +255,13 @@ def generate_launch_description():
                 parameters=[
                     {"use_sim_time": True},
                     {"model": model},
+                    {"confidence": confidence},
+                    {"stop_distance_m": stop_distance_m},
+                    {"device": device},
+                    {"sync_slop_s": sync_slop_s},
+                    {"depth_roi_margin_ratio": depth_roi_margin_ratio},
+                    {"depth_percentile": depth_percentile},
+                    {"min_path_overlap_ratio": min_path_overlap_ratio},
                 ],
             ),
             Node(
