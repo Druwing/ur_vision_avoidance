@@ -35,6 +35,7 @@ def launch_simulation(context, *args, **kwargs):
     activate_joint_controller = LaunchConfiguration("activate_joint_controller")
     enable_motion_loop = LaunchConfiguration("enable_motion_loop")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
+    
 
     robot_description_content = Command(
         [
@@ -134,6 +135,14 @@ def generate_launch_description():
     enable_rl_starter = LaunchConfiguration("enable_rl_starter")
     rl_model = LaunchConfiguration("rl_model")
     enable_motion_loop = LaunchConfiguration("enable_motion_loop")
+
+    confidence = LaunchConfiguration("confidence")
+    stop_distance_m = LaunchConfiguration("stop_distance_m")
+    device = LaunchConfiguration("device")
+    sync_slop_s = LaunchConfiguration("sync_slop_s")
+    depth_roi_margin_ratio = LaunchConfiguration("depth_roi_margin_ratio")
+    depth_percentile = LaunchConfiguration("depth_percentile")
+    min_path_overlap_ratio = LaunchConfiguration("min_path_overlap_ratio")
 
     custom_description = PathJoinSubstitution(
         [package_share, "urdf", "ur_gz_camera.urdf.xacro"]
