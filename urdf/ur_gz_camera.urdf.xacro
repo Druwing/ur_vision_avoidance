@@ -70,8 +70,11 @@
   <joint name="camera_mount_joint" type="fixed">
     <parent link="tool0"/>
     <child link="camera_link"/>
-    <!-- Change this pose to match the real camera bracket. -->
-    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <!-- Change this pose to match the real camera bracket.
+         Gazebo cameras look along +X of the link and use +Z as image "up".
+         With the flange pointing down, rpy="0 0 0" produced upside-down images
+         (YOLO missed the chair); the roll of pi keeps the image upright. -->
+    <origin xyz="0 0 0.08" rpy="3.14159265359 0 0"/>
   </joint>
 
   <!-- ROS REP-103 optical frame: z forward, x right, y down. -->
@@ -112,8 +115,12 @@
     </plugin>
   </gazebo>
 
+  <!-- Start in a well-conditioned pose (the first motion_loop waypoint). The
+       upstream default (arm straight up) is singular: action_adapter refuses to
+       start there, and with commands enabled it would hold that pose. -->
   <xacro:ur_ros2_control
     name="$(arg name)"
     tf_prefix="$(arg tf_prefix)"
-    transmission_hw_interface="$(arg transmission_hw_interface)"/>
+    transmission_hw_interface="$(arg transmission_hw_interface)"
+    initial_positions="${dict(shoulder_pan_joint=0.0,shoulder_lift_joint=-1.2,elbow_joint=1.4,wrist_1_joint=-1.7,wrist_2_joint=-1.57,wrist_3_joint=0.0)}"/>
 </robot>

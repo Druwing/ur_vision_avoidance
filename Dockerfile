@@ -53,6 +53,22 @@ RUN bash -lc "source /opt/ros/jazzy/setup.bash && \
     echo 'source /opt/venvs/ros/bin/activate' >> /etc/bash.bashrc && \
     echo 'source /ros2_ws/install/setup.bash' >> /etc/bash.bashrc"
 
+# ROS 2 console scripts are generated with #!/usr/bin/python3, so they do not
+# see packages installed only in the venv (Ultralytics, stable-baselines3).
+# Expose the venv site-packages to the system interpreter used by ros2 run/launch.
+ENV PYTHONPATH=/opt/venvs/ros/lib/python3.12/site-packages
+ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
+
+# Optional RL runtime (rl_policy_node). Keep NumPy 1.x for the ROS cv_bridge.
+RUN /opt/venvs/ros/bin/python -m pip install --no-cache-dir \
+    "numpy==1.26.4" "gymnasium>=0.29,<1.1" "stable-baselines3>=2.3,<3.0"
+
+# Cache the Fuel chair used by worlds/obstacle_world.sdf. Containers are
+# recreated on every run, and a failed download at launch ("Error in REST
+# request") leaves the world unloaded.
+RUN bash -lc "source /opt/ros/jazzy/setup.bash && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair"
+
 # Include this package in standalone image builds. The compose bind mount still
 # supports rapid source iteration during development.
 COPY . /ros2_ws/src/ur_vision_avoidance

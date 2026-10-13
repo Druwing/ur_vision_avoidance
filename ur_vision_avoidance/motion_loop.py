@@ -32,6 +32,8 @@ class MotionLoop(Node):
         self.declare_parameter("sensor_timeout_s", 0.75)
         self.declare_parameter("waypoint_duration_s", 4.0)
         self.declare_parameter("start_immediately", True)
+        # Optional override: flattened list of 6*N joint positions.
+        self.declare_parameter("waypoints", [0.0])
 
         self.joint_names = [
             "shoulder_pan_joint",
@@ -48,6 +50,11 @@ class MotionLoop(Node):
             [0.55, -1.05, 1.20, -1.55, -1.57, 0.00],
             [0.00, -1.05, 1.20, -1.55, -1.57, 0.00],
         ]
+        flat = [float(x) for x in self.get_parameter("waypoints").value]
+        if len(flat) >= 6 and len(flat) % 6 == 0:
+            self.waypoints = [flat[i:i + 6] for i in range(0, len(flat), 6)]
+        elif flat != [0.0]:
+            raise ValueError("waypoints must contain a multiple of 6 joint positions")
         self.waypoint_duration_s = float(self.get_parameter("waypoint_duration_s").value)
         self.sensor_timeout_s = float(self.get_parameter("sensor_timeout_s").value)
         self.latest_positions: Optional[list[float]] = None

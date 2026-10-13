@@ -1,5 +1,9 @@
 # Fixed-scene RL starter configuration.
 # Augmented randomized domain (ARD) is intentionally disabled in this stage.
+#
+# This file is read by fixed_scene_env.py / train_fixed_scene.py and by the ROS
+# nodes action_adapter, rl_observation_node and rl_policy_node (through
+# scene_config.load_scene), so training and deployment share one description.
 training:
   environment: fixed_scene
   total_timesteps: 100000
@@ -23,6 +27,8 @@ action:
 
 fixed_scene:
   # Nominal motion is +X toward the goal. The obstacle is fixed in front of it.
+  # NOTE: the 1.2 m path is longer than the UR5e reach (0.85 m). Use
+  # `ur5e_scene` for a policy that will run on the robot.
   goal_position_m: [1.20, 0.0, 0.45]
   obstacle_position_m: [0.65, 0.0, 0.45]
   obstacle_radius_m: 0.16
@@ -32,3 +38,29 @@ fixed_scene:
   goal_tolerance_m: 0.08
   nominal_speed_mps: 0.08
   lateral_clearance_m: 0.32
+
+ur5e_scene:
+  # Scaled-down variant that fits the UR5e workspace. Positions are relative to
+  # the start pose and expressed in the TASK frame (+x follows the start->goal
+  # path; on the robot the path direction is the action_adapter parameter
+  # `path_direction`, in base_link). Train with:
+  #   python3 -m ur_vision_avoidance.train_fixed_scene --scene ur5e_scene
+  start_position_m: [0.0, 0.0, 0.0]
+  goal_position_m: [0.45, 0.0, 0.0]
+  obstacle_position_m: [0.22, 0.0, 0.0]
+  obstacle_radius_m: 0.06
+  max_episode_steps: 200
+  # Centre distance 0.18 = radius 0.06 + 0.12: the policy must stay outside
+  # the action_adapter stop zone (stop_clearance_m 0.10 from the surface),
+  # otherwise it learns a path that the safety filter blocks on the robot.
+  collision_distance_m: 0.18
+  goal_tolerance_m: 0.03
+  nominal_speed_mps: 0.05
+  max_linear_mps: 0.08
+  clearance_margin_m: 0.25
+  reward: shaped
+  penalty_clearance_m: 0.16
+  # Obstacle-position randomization (task frame). Without it the policy solved
+  # the training scene but failed 4/5 placements on the UR5e kinematic loop.
+  obstacle_jitter_min_m: [-0.02, -0.06, -0.06]
+  obstacle_jitter_max_m: [0.06, 0.06, 0.06]

@@ -25,6 +25,10 @@
 
     <model name="ground_plane">
       <static>true</static>
+      <!-- 0.1 m thick box: lower it so the floor surface is at z = 0 (it was
+           at +0.05 m, which sank the chair and put the floor above the
+           localizer's min_height_m filter). -->
+      <pose>0 0 -0.05 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>12 12 0.1</size></box></geometry>
@@ -36,10 +40,37 @@
       </link>
     </model>
 
-    <!-- OpenRobotics Fuel asset; the pretrained detector has a COCO `chair` class. -->
+    <!-- Scene layout (world == base_link). From the initial pose
+         q = [0, -1.2, 1.4, -1.7, -1.57, 0] the TCP is at (0.631, 0.133, 0.374)
+         and the camera looks along -y, which is also the default task path
+         (action_adapter path_direction = [0, -1, 0], 0.45 m long).
+         Keep config/scene_ground_truth.yaml in sync with these poses. -->
+
+    <!-- Geometric obstacle ON the path: same placement as `ur5e_scene`
+         (0.22 m along the path, ~0.06 m radius). It is not a COCO class, so
+         YOLO does not see it; the depth fallback of vision_node does.
+         Static and suspended on purpose (no pedestal in the depth image). -->
+    <model name="box_obstacle">
+      <static>true</static>
+      <pose>0.63 -0.09 0.37 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.10 0.10 0.10</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.10 0.10 0.10</size></box></geometry>
+          <material><ambient>0.1 0.2 0.8 1</ambient><diffuse>0.1 0.2 0.8 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- OpenRobotics Fuel asset; the pretrained detector has a COCO `chair` class.
+         Placed beyond the end of the path (visible, not in collision). The
+         previous pose (0.80, 0, 0) intersected the arm on its way to the
+         initial pose. -->
     <include>
       <name>chair_obstacle</name>
-      <pose>0.80 0.00 0.0 0 0 1.57</pose>
+      <pose>0.65 -1.10 0.0 0 0 0</pose>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair</uri>
     </include>
   </world>

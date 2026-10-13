@@ -4,9 +4,9 @@
 
 UR Vision Avoidance is a ROS 2 Jazzy and Gazebo Harmonic research prototype for attaching an RGB-D camera to a Universal Robots arm, detecting obstacles with Ultralytics YOLO, estimating their distance from depth data, and experimenting with learned avoidance actions.
 
-The package is designed for perception and integration experiments. It is **not a safety-rated collision-avoidance system**, protective-stop implementation, or production robot controller. The repository now includes a fixed-scene reinforcement-learning starter scaffold, but no trained policy is bundled. Augmented randomized domain (ARD) is intentionally disabled in this stage. The supplied legacy motion response remains a deterministic shoulder-pan retreat.
+The package is designed for perception and integration experiments. It is **not a safety-rated collision-avoidance system**, protective-stop implementation, or production robot controller. The repository includes a fixed-scene reinforcement-learning scaffold and a PPO policy trained on `ur5e_scene` (`models/ppo_ur5e_scene.zip`). Full augmented randomized domain (ARD) is still disabled; `ur5e_scene` only randomizes the obstacle position. The supplied legacy motion response remains a deterministic shoulder-pan retreat.
 
-The default simulation uses a UR5e model, a camera mounted on the tool frame, an RGB-D camera stream, a chair from Gazebo Fuel, and a geometric box obstacle. The bundled `yolo26n.pt` checkpoint is a general pretrained model. It can detect COCO classes such as `person` and `chair`, but it is not guaranteed to recognize every geometric obstacle in the sample world.
+The default simulation uses a UR5e model starting in a well-conditioned pose, a camera mounted on the tool frame, an RGB-D camera stream, a geometric box obstacle on the task path, and a chair from Gazebo Fuel beyond the end of the path. The bundled `yolo26n.pt` checkpoint is a general pretrained model. It can detect COCO classes such as `person` and `chair`, but not the geometric box; that one is seen by the class-agnostic depth fallback of `vision_node`.
 
 ## Architecture
 
@@ -41,13 +41,16 @@ flowchart LR
 | `urdf/ur_gz_camera.urdf.xacro` | Expands the UR5e description, attaches `camera_link` and `camera_optical_frame`, adds the Gazebo RGB-D sensor, and loads simulated ROS 2 control. |
 | `worlds/obstacle_world.sdf` | Starts Gazebo physics, rendering, sensor processing, ground plane, chair, and box obstacle. |
 | `config/bridge.yaml` | Bridges Gazebo RGB, depth, and camera-info topics into ROS 2. |
-| `vision_node` | Runs YOLO on each RGB frame, samples a depth patch at each detection center, and publishes detection and obstacle topics. |
+| `vision_node` | Runs YOLO on each RGB frame, samples a depth ROI inside each box, adds class-agnostic "unknown" detections for near depth regions YOLO did not explain, and publishes detection, latency and obstacle topics. |
 | `avoidance_supervisor` | Listens for an obstacle request and, only when explicitly enabled, sends one bounded shoulder-pan trajectory to the simulated controller. |
 | `motion_loop` | Optional fixed-waypoint simulation loop that continuously sends trajectories and pauses on `/obstacle/stop`. |
 | `fixed_scene_env.py` | Provides a deterministic Gymnasium training environment for one fixed obstacle and one nominal path. ARD is disabled. |
 | `train_fixed_scene.py` | Trains an optional PPO policy against the fixed-scene environment. |
 | `rl_observation_node` | Combines detections and joint state into a versioned JSON observation topic. |
 | `rl_policy_node` | Loads a PPO checkpoint and publishes bounded actions. It does not directly command the robot. |
+| `obstacle_localizer` / `action_adapter` | 3D tracks in `base_link`; clearance-aware joint commands (see [below](#obstacle-localization-action-adapter-and-rl-contract)). |
+| `metrics_node` | One row of safety/control/perception metrics per episode against `config/scene_ground_truth.yaml`. |
+| `dataset_capture` | Saves RGB frames with 2D labels projected from the ground-truth boxes (for the YOLO benchmark and fine-tuning). |
 | `launch/vision_bringup.launch.py` | Starts Gazebo, robot state publication, controllers, camera bridge, perception, and optional avoidance. |
 | `yolo26n.pt` | Bundled Ultralytics checkpoint. A custom `best.pt` can be supplied at launch time. |
 
@@ -55,7 +58,7 @@ flowchart LR
 
 The camera publishes RGB and depth frames in Gazebo. `ros_gz_bridge` converts them to ROS 2 sensor messages using sensor-data QoS. `vision_node` performs inference on the RGB image and filters detections against its configured `target_classes` list.
 
-For each retained detection, the node computes the bounding-box center and samples a median depth patch around that pixel. A detection is considered close when its estimated range is at or below `stop_distance_m` and its center lies inside the horizontal path region from 20% to 80% of the image width. When `require_depth` is true, stale or missing depth cannot produce a close-obstacle request.
+For each retained detection, the node crops the bounding box (minus a 15% margin per side) in the depth image and takes the 25th percentile of the valid samples. Near depth regions (closer than `depth_fallback_max_m`, 0.60 m by default) that no YOLO box explains are reported as `unknown` detections with `source: depth`, so obstacles outside the detector classes or missed at short range still stop or deflect the robot. A detection is considered close when its estimated range is at or below `stop_distance_m` and its box overlaps the horizontal path region (20% to 80% of the image width) by at least `min_path_overlap_ratio`. When `require_depth` is true, stale or missing depth cannot produce a close-obstacle request.
 
 The supervisor is disabled by default. When enabled, it reacts to a rising edge on `/obstacle/stop`, checks that joint states are fresh, checks that the trajectory action server is available, and sends a bounded shoulder-pan retreat. This behavior is intended for simulation experiments only.
 
@@ -122,7 +125,7 @@ source /opt/venvs/ros/bin/activate
 source /ros2_ws/install/setup.bash
 ```
 
-For a ROS container, install the package in the interpreter used by the ROS node, or expose the virtual-environment site-packages explicitly. Do not assume that activating a virtual environment in one terminal changes an already-running launch process.
+The bundled Dockerfile does the latter (`ENV PYTHONPATH=/opt/venvs/ros/lib/python3.12/site-packages`): without it, `vision_node` died at start-up in the container. For a ROS container, install the package in the interpreter used by the ROS node, or expose the virtual-environment site-packages explicitly. Do not assume that activating a virtual environment in one terminal changes an already-running launch process.
 
 ### NumPy and `cv_bridge` compatibility
 
@@ -304,9 +307,12 @@ The default detector parameters are declared in `vision_node.py`:
 
 - Confidence threshold: `0.45`.
 - Stop distance: `0.80 m`.
-- RGB/depth timestamp tolerance: `0.50 s`.
+- RGB/depth timestamp tolerance (`sync_slop_s`): `0.08 s`.
+- Depth ROI: 15% margin per side, 25th percentile, at least 20 valid samples in [0.05, 10] m.
 - Depth is required for a close-obstacle decision.
-- Target classes: `person`, `chair`, `car`, `truck`, `bus`, `bicycle`, and `motorcycle`.
+- Target classes: `person`, `chair`, `bench`, `car`, `truck`, `bus`, `bicycle`, and `motorcycle` (`bench`: in Gazebo the chair is labelled "bench" at short range).
+- Depth fallback: enabled, 0.60 m range, regions of at least 2% of the image, label `unknown`.
+- Each `/vision/detections` message carries `inference_ms`, `processing_ms` and `age_s` (image stamp to publication).
 
 The node can be run independently with ROS parameters if the camera topics are already available:
 
@@ -394,6 +400,15 @@ python3 -m ur_vision_avoidance.train_fixed_scene \
   --output /tmp/ur_vision_avoidance_ppo
 ```
 
+The bundled `models/ppo_ur5e_scene.zip` (the default `rl_model` of the launch file) was trained with:
+
+```bash
+python3 -m ur_vision_avoidance.train_fixed_scene --scene ur5e_scene \
+  --timesteps 1500000 --seed 7 --output models/ppo_ur5e_scene
+```
+
+`ur5e_scene` uses `reward: shaped` and obstacle-position jitter (see `config/rl_starter.yaml`). With the legacy reward the policy learned to stop in front of the obstacle (standing still cost about -2 per episode, trying to pass risked -100); with 500k steps the shaped reward had not converged yet (3% success on the UR5e loop), with 1.5M it reaches a mean episode reward of ~35. `rl_policy_node` loads checkpoints independently of the NumPy version used for training (the ROS image needs NumPy 1.x for `cv_bridge`).
+
 The command produces `/tmp/ur_vision_avoidance_ppo.zip`. ARD is rejected explicitly in this starter stage:
 
 ```bash
@@ -423,13 +438,182 @@ ros2 topic echo /rl/observation --once
 ros2 topic echo /rl/action --once
 ```
 
-The observation adapter consumes `/vision/detections` and `/joint_states`, then publishes JSON with the schema name `ur_vision_avoidance.rl_observation.v1`. It includes detection confidence, depth validity, sensor age, joint positions, joint velocities, and an obstacle summary. The policy node publishes six bounded values on `/rl/action`: three linear velocity offsets in metres per second and three angular velocity offsets in radians per second.
+The observation adapter consumes `/task/state` (from `action_adapter`) and `/obstacle/tracks` (from `obstacle_localizer`), then publishes JSON with the schema name `ur_vision_avoidance.rl_observation.v2`. It carries the 16-element `vector` (relative goal, relative obstacle, TCP velocity, previous action, remaining time, in the task frame), the obstacle summary and the sensor ages. The policy node publishes six bounded values on `/rl/action`: three linear velocity offsets in metres per second and three angular velocity offsets in radians per second.
 
-The policy node publishes zeros when no model is supplied, sensor data are stale, the observation is invalid, or inference fails. This conservative behavior is intentional. There is no automatic conversion from `/rl/action` to a `FollowJointTrajectory` goal in this stage. A later controller adapter must implement kinematic limits, collision checks, trajectory smoothing, stale-data handling, and a deterministic fallback before any action is executed.
+The policy node publishes zeros when no model is supplied, sensor data are stale, the observation is invalid, or inference fails. This conservative behavior is intentional. The conversion from `/rl/action` to joint commands is done by `action_adapter` in `rl` mode, with kinematic limits, a clearance filter, stale-data handling and a deterministic `potential_field` fallback; see the next section (it is disabled by default and sends commands only with `adapter_enable_command:=true`).
 
 ### Fixed-stage limitations
 
-The starter policy sees one fixed obstacle arrangement during training. It can memorize that arrangement and should not be expected to generalize. Do not enable ARD by editing the configuration and then treat the result as validated training; ARD is a separate development stage. The next stage should add obstacle-position variation, then sensor noise and latency, and only later moving obstacles and sim-to-real evaluation.
+With `fixed_scene` the policy sees one fixed obstacle arrangement during training. It can memorize that arrangement and should not be expected to generalize. `ur5e_scene` adds obstacle-position jitter only (no sensor noise, latency or moving obstacles). Do not enable ARD by editing the configuration and then treat the result as validated training; ARD is a separate development stage. The next stage should add obstacle-position variation, then sensor noise and latency, and only later moving obstacles and sim-to-real evaluation.
+
+## Obstacle localization, action adapter and RL contract
+
+These modules close the loop between perception and motion. Everything below is **simulation-only research code**: it has been exercised with unit tests, a kinematic closed-loop simulation, mocked ROS plumbing and headless ROS 2 Jazzy + Gazebo Harmonic episodes (see [Experiments](#experiments-and-results)).
+
+```mermaid
+flowchart LR
+    V["/vision/detections"] --> L["obstacle_localizer<br/>back-project + TF2 + tracker"]
+    CI["/camera/camera_info"] --> L
+    L --> T["/obstacle/tracks (base_link, with memory)"]
+    J["/joint_states"] --> A["action_adapter"]
+    T --> A
+    A --> S["/task/state"]
+    S --> O["rl_observation_node"]
+    T --> O
+    O --> OB["/rl/observation v2"]
+    OB --> P["rl_policy_node"]
+    P --> AC["/rl/action (task frame)"]
+    AC --> A
+    A --> C["joint trajectory point"]
+```
+
+| Node | Responsibility |
+|---|---|
+| `obstacle_localizer` | Back-projects each detection (bounding-box centre + sampled depth) with the `CameraInfo` intrinsics, transforms it to `base_link` with the TF available **at the image timestamp** (the camera moves with the arm), and keeps persistent tracks. Tracks stay in memory for `memory_s` (default 10 s) after the obstacle leaves the field of view. Publishes `/obstacle/tracks` (JSON) and `/obstacle/markers` (RViz). Detections are dropped, never guessed, when the transform is missing. |
+| `action_adapter` | Owns the episode (start pose, goal, task frame) and publishes `/task/state`. Converts motion into a joint trajectory point (damped least squares) in one of three modes: `potential_field` (deterministic avoidance), `rl` (nominal motion + `/rl/action`, falls back to `potential_field` if the action is absent) or `nominal`. The same safety layer runs in every mode. Commands reach the controller only if `enable_command` is true; otherwise they are only published on `/avoidance/adapter_command`. |
+| `rl_observation_node` | Builds the 16-element observation from `/task/state`, `/obstacle/tracks` and the previous action, using `rl_contract.build_observation` - the same function the training environment uses. |
+| `rl_policy_node` | Runs PPO on `/rl/observation` and publishes the bounded action. Zero action if there is no model, no obstacle, stale sensors, a wrong schema, or the obstacle is beyond `engage_distance_m` (outside the training distribution). |
+
+### Run it
+
+1. The robot spawns in a well-conditioned pose (`initial_positions` in the URDF: the first `motion_loop` waypoint). The upstream default (arm straight up) is singular; the adapter refuses to start there (`goal_unreachable`).
+
+2. Launch with the adapter in observe-only mode first, and inspect it:
+
+   ```bash
+   ros2 launch ur_vision_avoidance vision_bringup.launch.py enable_action_adapter:=true
+   ros2 topic echo /obstacle/tracks --once
+   ros2 topic echo /task/state --once
+   ros2 topic echo /avoidance/adapter_command --once
+   ```
+
+3. Only then let it move the simulated robot (do **not** combine with `enable_motion_loop` or `enable_avoidance`; they command the same controller):
+
+   ```bash
+   ros2 launch ur_vision_avoidance vision_bringup.launch.py \
+     enable_action_adapter:=true adapter_enable_command:=true adapter_mode:=potential_field
+   ```
+
+4. Episodes do not start by themselves (`adapter_auto_start:=false`): start one with `ros2 topic pub --once /task/start std_msgs/msg/Empty "{}"`, stop it with `/task/stop`, restart from the current pose with `/task/reset`. Before `/task/start` the adapter sends nothing to the controller, so other tools can move the arm.
+
+The adapter sends position-only trajectory points: the joint trajectory controller rejects a final point with non-zero velocity, which previously dropped every command in Gazebo.
+
+Useful `action_adapter` parameters: `path_direction` (start-to-goal direction in `base_link`, default `[0, -1, 0]`), `stop_clearance_m`, `slow_clearance_m`, `influence_m`, `max_speed_mps`, `max_joint_vel_rps`, `require_fresh_perception`, `scene_section`. Check that `camera_frame` of the localizer (default `camera_optical_frame`) matches `ros2 topic echo /camera/camera_info --field header.frame_id`, and that the `base_link -> camera_optical_frame` transform exists (`ros2 run tf2_ros tf2_echo base_link camera_optical_frame`).
+
+### RL contract: task frame and scene configuration
+
+Observation and action are expressed relative to the TCP in a **task frame** whose x axis follows the start-to-goal path (identity in the training environment). A policy trained along +x therefore remains valid for any `path_direction`. The observation layout lives in `rl_contract.py` and is shared by training and ROS.
+
+`config/rl_starter.yaml` is now read by the environment, the training script and the ROS nodes. `fixed_scene` reproduces the original 1.2 m scene, which is **longer than the UR5e reach (0.85 m)**; `ur5e_scene` is a scaled variant for the robot:
+
+```bash
+python3 -m ur_vision_avoidance.train_fixed_scene --scene ur5e_scene --timesteps 100000
+ros2 launch ur_vision_avoidance vision_bringup.launch.py \
+  enable_rl_starter:=true rl_model:=/tmp/ur_vision_avoidance_ppo.zip \
+  adapter_mode:=rl adapter_enable_command:=true
+```
+
+Note that `fixed_scene` leaves only about 10 steps of slack (150 of 160) for the nominal path at the nominal speed, so any detour must also use forward speed to finish before the timeout.
+
+### Safety layers inside the adapter
+
+- Joint-space **whole-body filter**: for the TCP, wrist and arm sample points, the approach speed toward each obstacle is limited to a value that goes to zero at `stop_clearance_m`, and becomes a forced retreat inside it. It acts in every mode, so a policy that pushes straight at an obstacle cannot force a collision in simulation.
+- Hold if an arm point is closer than `link_stop_clearance_m`, on stale joint states, on stale perception (default), on a singularity, or if the goal is not kinematically reachable at episode start.
+- Cartesian speed cap, workspace floor, orientation hold, adaptive damping near singularities, joint-speed scaling and joint-limit handling.
+
+### Verification and what it does not prove
+
+```bash
+python3 -m unittest discover -s test -p "test_*.py" -v   # no ROS, no pytest required
+```
+
+- Kinematics against the published UR5e zero pose and numerical Jacobians; tracker; back-projection round trip; avoidance primitives.
+- Kinematic closed loop on the UR5e model (ideal joint integrator): 6 obstacle placements, goal reached with no collision, orientation held, limits respected, adversarial RL offsets blocked. Without the safety filter the same tests fail.
+- The node classes are driven through fake `rclpy`/message/TF modules (`test/_fake_ros.py`); the tests skip themselves when a real `rclpy` is installed.
+
+This does **not** prove behaviour under Gazebo/ROS 2: no controller dynamics, latency, camera noise, real TF or QoS are involved, and the YOLO model is not in the loop. Treat the first Gazebo run as the first real integration test.
+
+### Known limitations
+
+- Reactive avoidance is not complete. The arm links trail the TCP, so an obstacle that ends up "threaded" by the forearm can block the return to the path (the filter holds the arm safe rather than finishing the task). A planner (for example MoveIt or RRT*) is the proper next step. Two of 32 placements explored during development did not finish within the time limit.
+- Only the TCP and wrist are actively steered; the elbow and forearm are only protected by the filter and the backstop.
+- Obstacles are spheres (centre estimated by pushing the surface point back by a radius derived from the bounding box). Memory expires by time only; there is no free-space clearing, so a moved obstacle can leave a ghost until `memory_s`.
+- The fixed-scene policy has one obstacle arrangement in training and no ARD; it publishes zero outside `engage_distance_m`.
+- The potential field adds speed to the avoidance (about 2x faster than the filter alone in a head-on case) but the filter alone also completed all tested placements, only more slowly.
+
+## Experiments and results
+
+All commands run inside the Docker image (`docker compose run --rm ros2jazzy-gazebo bash`, then `source install/setup.bash`). Results below were produced on a 12-core CPU without CUDA (YOLO on CPU, Gazebo rendering in the same container), October 2026.
+
+### Gazebo integration issues found and fixed
+
+The first ROS 2 + Gazebo runs exposed problems that the unit and mocked tests could not see:
+
+| Problem | Symptom | Fix |
+|---|---|---|
+| Console scripts use `/usr/bin/python3` | `vision_node` died with `ModuleNotFoundError: ultralytics` | `PYTHONPATH` to the venv in the Dockerfile |
+| Chair at (0.80, 0, 0) enclosed the TCP at the initial pose | arm blocked on its way to the pose (controller state-tolerance abort), camera under the seat | box on the path, chair beyond its end |
+| Camera mount `rpy="0 0 0"` | upside-down images; YOLO missed the chair | roll of pi on `camera_mount_joint` |
+| Trajectory points with velocities | JTC rejected every adapter command ("Velocity of last trajectory point ... is not zero") | position-only points |
+| Singular spawn pose + adapter holding it | arm could never be moved to a usable pose with commands enabled | `initial_positions` in the URDF, `/task/start` trigger |
+| YOLO-only perception | with the chair close, no detection and the arm drove under the seat; "bench" label filtered out | class-agnostic depth fallback, `bench` target class |
+| Ground box centred at z = 0 | floor surface at z = +0.05 m, chair sunk, floor regions tracked as obstacles | ground plane lowered by 0.05 m |
+| PPO saved with NumPy 2 | `rl_policy_node` could not unpickle the policy under NumPy 1.x and published zeros | NumPy-independent loading |
+| Fuel download at every container start | world not loaded after a transient REST error | chair cached in the image |
+
+### Closed-loop avoidance in Gazebo
+
+```bash
+for i in 1 2 3; do
+  for m in rl potential_field nominal; do
+    src/ur_vision_avoidance/scripts/run_gazebo_episode.sh $m ${m}_$i 120
+  done
+done
+python3 src/ur_vision_avoidance/scripts/summarize_metrics.py /tmp/ur_vision_avoidance_metrics/episodes.jsonl
+```
+
+| mode | n | success | collisions | min true clearance (m) | time to goal (s) | path (m) | max deviation (m) | detection age (s) | YOLO inference (ms) | depth-track error (m) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| nominal | 3 | 3/3 | 0 | 0.025 ± 0.000 | 29.7 ± 0.1 | 0.588 ± 0.001 | 0.162 ± 0.001 | 0.039 ± 0.013 | 52 ± 9 | 0.014 ± 0.000 |
+| potential_field | 4 | 4/4 | 0 | 0.068 ± 0.001 | 16.8 ± 0.2 | 0.717 ± 0.004 | 0.197 ± 0.004 | 0.052 ± 0.055 | 72 ± 45 | 0.033 ± 0.003 |
+| rl | 5 | 5/5 | 0 | 0.076 ± 0.001 | 18.5 ± 8.0 | 0.910 ± 0.189 | 0.228 ± 0.001 | 0.044 ± 0.001 | 72 ± 7 | 0.037 ± 0.021 |
+
+All 12 episodes (default world: box on the path, chair beyond it; YOLO26n + depth fallback) reached the goal with no collision against the ground-truth boxes. The potential field is repeatable (16.8 s, 6.8 cm clearance); nominal motion protected only by the safety filter is the slowest and passes closest (29.7 s, 2.5 cm). The PPO policy keeps the largest clearance (7.6 cm) but is bimodal: 2 of 5 episodes finished in 9.7 s (fastest of all), 3 of 5 took a longer detour (24.4 s, 1.05 m path). The box was only ever seen by the depth fallback (`unknown` tracks, 1.4-3.7 cm surface error); the chair, localized from YOLO boxes, had 1.8 cm (`chair`) and 4.0 cm (`bench`) error. Detection age is image stamp to publication in simulated time; YOLO inference ran at 50-70 ms per frame on the CPU (160-180 ms when a PPO training job shared the CPU).
+
+### Decision layer on the kinematic UR5e loop
+
+`scripts/evaluate_kinematic.py` runs 60 sphere placements (4 along the path x 5 lateral x 3 vertical, radius 0.06 m) with the same safety layer, without camera or controller dynamics:
+
+| mode | success | collisions | min clearance (m) | mean time (s) | mean path (m) |
+|---|---|---|---|---|---|
+| PPO (`rl`), all 60 | 55% | 0 | 0.022 | 6.4 | 0.615 |
+| PPO, 27 inside the training jitter | 67% | 0 | 0.032 | 7.0 | 0.652 |
+| PPO, 33 outside | 45% | 0 | 0.022 | 5.7 | 0.570 |
+| potential field, all 60 | 77% | 0 | 0.022 | 13.1 | 0.647 |
+| nominal + safety filter, all 60 | 87% | 0 | 0.022 | 15.9 | 0.486 |
+
+The safety filter prevented every collision in every mode. The policy is about twice as fast when it succeeds, but it fails more often than the deterministic baselines, mostly by stalling next to the obstacle (timeouts, not collisions), and degrades outside its training range.
+
+### YOLO model comparison (Table 2)
+
+```bash
+src/ur_vision_avoidance/scripts/capture_dataset.sh 200 /tmp/ur_vision_avoidance_dataset
+python3 src/ur_vision_avoidance/scripts/benchmark_yolo.py --dataset /tmp/ur_vision_avoidance_dataset \
+  --models src/ur_vision_avoidance/yolo26n.pt models/yolo26s.pt models/yolo26m.pt models/yolo11n.pt models/yolov8n.pt \
+  --alias bench=chair --device cpu
+```
+
+93 labelled frames (69 box and 90 chair instances, labels projected from `config/scene_ground_truth.yaml`, occlusion checked against depth), confidence 0.45, IoU 0.5, 640 px, CPU:
+
+| model | chair AP50 | chair P | chair R | chair F1 | box R | latency mean / p95 (ms) |
+|---|---|---|---|---|---|---|
+| yolo26n | 0.753 | 1.000 | 0.133 | 0.235 | 0.000 | 63 / 246 |
+| yolo26s | 0.276 | 0.556 | 0.056 | 0.101 | 0.000 | 140 / 582 |
+| yolo26m | 0.072 | 1.000 | 0.011 | 0.022 | 0.000 | 341 / 852 |
+| yolo11n | 0.865 | 0.886 | 0.433 | 0.582 | 0.000 | 66 / 147 |
+| yolov8n | 0.903 | 1.000 | 0.389 | 0.560 | 0.000 | 63 / 203 |
+
+No COCO checkpoint finds the geometric box (no such class): it needs a fine-tuned model (the capture writes `data.yaml` and YOLO labels) or the depth fallback. On this small, single-scene dataset the older nano models recall the chair far better than the YOLO26 family at the operating threshold. The chair labels are projections of its 3D bounding box, slightly larger than a tight 2D box, which lowers IoU for every model alike. Treat these numbers as a pipeline demonstration; a conclusive comparison needs more scenes, viewpoints and lighting.
 
 ## Troubleshooting
 
@@ -517,6 +701,18 @@ This repository is suitable for simulation and research integration. It is not s
 - `ur_vision_avoidance/rl_observation_node.py`: structured ROS observation adapter.
 - `ur_vision_avoidance/rl_policy_node.py`: bounded PPO inference node that does not command the robot.
 - `ur_vision_avoidance/motion_loop.py`: fixed-waypoint continuous simulation loop with obstacle pause.
+- `ur_vision_avoidance/obstacle_localizer_node.py`: back-projection, TF2 transform and persistent 3D obstacle tracks.
+- `ur_vision_avoidance/action_adapter_node.py`: task-space motion to joint commands with the safety layer (potential field / RL / nominal).
+- `ur_vision_avoidance/avoidance_logic.py`, `ur_kinematics.py`, `obstacle_tracker.py`, `camera_geometry.py`: ROS-free logic used by the nodes.
+- `ur_vision_avoidance/rl_contract.py`, `scene_config.py`: shared observation layout, task frame and scene loading.
+- `ur_vision_avoidance/depth_fallback.py`: class-agnostic near-region detection on the depth image.
+- `ur_vision_avoidance/metrics.py`, `metrics_node.py`: episode metrics against the scene ground truth.
+- `ur_vision_avoidance/dataset_labels.py`, `dataset_capture_node.py`: auto-labelled dataset capture.
+- `scripts/run_gazebo_episode.sh`, `scripts/capture_dataset.sh`: headless Gazebo experiments.
+- `scripts/evaluate_kinematic.py`, `scripts/benchmark_yolo.py`: decision-layer comparison and YOLO model comparison.
+- `config/scene_ground_truth.yaml`: obstacle boxes of the world, in `base_link`.
+- `models/ppo_ur5e_scene.zip`: PPO policy trained on `ur5e_scene`.
+- `test/`: unit tests, closed-loop kinematic simulation and mocked-ROS node tests (`python3 -m unittest discover -s test`).
 - `urdf/ur_gz_camera.urdf.xacro`: UR5e plus camera description.
 - `worlds/obstacle_world.sdf`: Gazebo test world.
 - `config/bridge.yaml`: Gazebo-to-ROS topic bridge configuration.

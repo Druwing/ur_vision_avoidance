@@ -14,6 +14,7 @@ from launch.substitutions import (
     IfElseSubstitution,
     LaunchConfiguration,
     PathJoinSubstitution,
+    PythonExpression,
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -135,6 +136,17 @@ def generate_launch_description():
     enable_rl_starter = LaunchConfiguration("enable_rl_starter")
     rl_model = LaunchConfiguration("rl_model")
     enable_motion_loop = LaunchConfiguration("enable_motion_loop")
+    enable_action_adapter = LaunchConfiguration("enable_action_adapter")
+    adapter_mode = LaunchConfiguration("adapter_mode")
+    adapter_enable_command = LaunchConfiguration("adapter_enable_command")
+    scene_section = LaunchConfiguration("scene_section")
+    path_direction = LaunchConfiguration("path_direction")
+    adapter_auto_start = LaunchConfiguration("adapter_auto_start")
+    enable_metrics = LaunchConfiguration("enable_metrics")
+    metrics_output_dir = LaunchConfiguration("metrics_output_dir")
+    run_label = LaunchConfiguration("run_label")
+    depth_fallback_enabled = LaunchConfiguration("depth_fallback_enabled")
+    depth_fallback_max_m = LaunchConfiguration("depth_fallback_max_m")
 
     confidence = LaunchConfiguration("confidence")
     stop_distance_m = LaunchConfiguration("stop_distance_m")
@@ -150,6 +162,7 @@ def generate_launch_description():
     bundled_model = PathJoinSubstitution([package_share, "models", "yolo26n.pt"])
     world_file = PathJoinSubstitution([package_share, "worlds", "obstacle_world.sdf"])
     bridge_config = PathJoinSubstitution([package_share, "config", "bridge.yaml"])
+    bundled_policy = PathJoinSubstitution([package_share, "models", "ppo_ur5e_scene.zip"])
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -174,13 +187,68 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "rl_model",
-                default_value="",
-                description="Path to a fixed-scene PPO .zip policy; empty publishes zero actions.",
+                default_value=bundled_policy,
+                description="PPO .zip policy (default: bundled ur5e_scene policy); empty publishes zero actions.",
             ),
             DeclareLaunchArgument(
                 "enable_motion_loop",
                 default_value="false",
                 description="Enable the fixed-waypoint simulation motion loop.",
+            ),
+            DeclareLaunchArgument(
+                "enable_action_adapter",
+                default_value="false",
+                description="Run action_adapter (also started automatically by enable_rl_starter).",
+            ),
+            DeclareLaunchArgument(
+                "adapter_mode",
+                default_value="potential_field",
+                description="action_adapter mode: potential_field, rl or nominal.",
+            ),
+            DeclareLaunchArgument(
+                "adapter_enable_command",
+                default_value="false",
+                description="Send adapter commands to the simulated controller. Simulation only.",
+            ),
+            DeclareLaunchArgument(
+                "adapter_auto_start",
+                default_value="false",
+                description="Start an episode at launch; otherwise publish std_msgs/Empty on /task/start.",
+            ),
+            DeclareLaunchArgument(
+                "enable_metrics",
+                default_value="false",
+                description="Run metrics_node (one CSV/JSONL row per episode, vs scene_ground_truth.yaml).",
+            ),
+            DeclareLaunchArgument(
+                "metrics_output_dir",
+                default_value="/tmp/ur_vision_avoidance_metrics",
+                description="Directory for episodes.csv / episodes.jsonl.",
+            ),
+            DeclareLaunchArgument(
+                "run_label",
+                default_value="",
+                description="Free text stored with every metrics row (e.g. model or mode).",
+            ),
+            DeclareLaunchArgument(
+                "depth_fallback_enabled",
+                default_value="true",
+                description="Report near depth regions that YOLO did not explain as 'unknown' obstacles.",
+            ),
+            DeclareLaunchArgument(
+                "depth_fallback_max_m",
+                default_value="0.60",
+                description="Range of the class-agnostic depth fallback.",
+            ),
+            DeclareLaunchArgument(
+                "scene_section",
+                default_value="ur5e_scene",
+                description="Section of config/rl_starter.yaml used by adapter and RL nodes.",
+            ),
+            DeclareLaunchArgument(
+                "path_direction",
+                default_value="[0.0, -1.0, 0.0]",
+                description="Start-to-goal direction in base_link (defines the task frame).",
             ),
             DeclareLaunchArgument("description_file", default_value=custom_description),
             DeclareLaunchArgument(
@@ -271,6 +339,8 @@ def generate_launch_description():
                     {"depth_roi_margin_ratio": depth_roi_margin_ratio},
                     {"depth_percentile": depth_percentile},
                     {"min_path_overlap_ratio": min_path_overlap_ratio},
+                    {"depth_fallback_enabled": depth_fallback_enabled},
+                    {"depth_fallback_max_m": depth_fallback_max_m},
                 ],
             ),
             Node(
@@ -290,7 +360,7 @@ def generate_launch_description():
                 name="rl_observation_adapter",
                 output="screen",
                 condition=IfCondition(enable_rl_starter),
-                parameters=[{"use_sim_time": True}],
+                parameters=[{"use_sim_time": True}, {"scene_section": scene_section}],
             ),
             Node(
                 package="ur_vision_avoidance",
@@ -298,7 +368,49 @@ def generate_launch_description():
                 name="rl_policy_node",
                 output="screen",
                 condition=IfCondition(enable_rl_starter),
-                parameters=[{"use_sim_time": True}, {"model_path": rl_model}],
+                parameters=[
+                    {"use_sim_time": True},
+                    {"model_path": rl_model},
+                    {"scene_section": scene_section},
+                ],
+            ),
+            Node(
+                package="ur_vision_avoidance",
+                executable="obstacle_localizer",
+                name="obstacle_localizer",
+                output="screen",
+                parameters=[{"use_sim_time": True}],
+            ),
+            Node(
+                package="ur_vision_avoidance",
+                executable="action_adapter",
+                name="action_adapter",
+                output="screen",
+                condition=IfCondition(
+                    PythonExpression(
+                        ["'", enable_action_adapter, "' == 'true' or '", enable_rl_starter, "' == 'true'"]
+                    )
+                ),
+                parameters=[
+                    {"use_sim_time": True},
+                    {"mode": adapter_mode},
+                    {"enable_command": adapter_enable_command},
+                    {"scene_section": scene_section},
+                    {"path_direction": path_direction},
+                    {"auto_start": adapter_auto_start},
+                ],
+            ),
+            Node(
+                package="ur_vision_avoidance",
+                executable="metrics_node",
+                name="metrics_node",
+                output="screen",
+                condition=IfCondition(enable_metrics),
+                parameters=[
+                    {"use_sim_time": True},
+                    {"output_dir": metrics_output_dir},
+                    {"run_label": run_label},
+                ],
             ),
             Node(
                 package="ur_vision_avoidance",

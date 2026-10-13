@@ -2,6 +2,11 @@
 
 Usage:
     python3 -m ur_vision_avoidance.train_fixed_scene --timesteps 100000
+    python3 -m ur_vision_avoidance.train_fixed_scene --scene ur5e_scene
+
+``--scene`` selects a section of ``config/rl_starter.yaml``. Use ``ur5e_scene``
+for a policy that will run on the UR5e (the original ``fixed_scene`` path is
+1.2 m long, longer than the UR5e reach).
 
 Augmented randomized domain is intentionally rejected here. This script is only
 for validating the observation/action contract in the fixed starter scene.
@@ -13,6 +18,7 @@ import argparse
 from pathlib import Path
 
 from .fixed_scene_env import FixedSceneAvoidanceEnv
+from .scene_config import default_config_path, load_scene
 
 
 def main() -> None:
@@ -20,6 +26,8 @@ def main() -> None:
     parser.add_argument("--timesteps", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output", type=Path, default=Path("/tmp/ur_vision_avoidance_ppo"))
+    parser.add_argument("--config", type=Path, default=None, help="Scene YAML (default: package config).")
+    parser.add_argument("--scene", default="fixed_scene", help="Section of the YAML to use.")
     parser.add_argument("--ard", action="store_true", help="Rejected in the starter stage.")
     args = parser.parse_args()
     if args.ard:
@@ -34,13 +42,17 @@ def main() -> None:
             "Training requires stable-baselines3 and gymnasium. Install requirements-rl.txt."
         ) from exc
 
-    env = FixedSceneAvoidanceEnv(seed=args.seed)
+    config_path = args.config or default_config_path()
+    scene = load_scene(config_path, args.scene)
+    print(f"Scene '{args.scene}' from {config_path}: {scene}")
+
+    env = FixedSceneAvoidanceEnv(seed=args.seed, scene=scene)
     model = PPO("MlpPolicy", env, verbose=1, seed=args.seed)
     model.learn(total_timesteps=args.timesteps)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(args.output))
     env.close()
-    print(f"Saved fixed-scene PPO policy to {args.output}.zip")
+    print(f"Saved fixed-scene PPO policy to {args.output}.zip (scene={args.scene})")
 
 
 if __name__ == "__main__":

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from typing import Any
 
+import cv2
 import message_filters
 import numpy as np
 import rclpy
@@ -21,6 +23,8 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, Float32, String
 from ultralytics import YOLO
+
+from .depth_fallback import find_near_blobs
 
 
 class VisionNode(Node):
@@ -43,7 +47,8 @@ class VisionNode(Node):
         self.declare_parameter("require_depth", True)
         self.declare_parameter(
             "target_classes",
-            ["person", "chair", "car", "truck", "bus", "bicycle", "motorcycle"],
+            # "bench": in Gazebo, YOLO labels the chair "bench" at short range.
+            ["person", "chair", "bench", "car", "truck", "bus", "bicycle", "motorcycle"],
         )
         self.declare_parameter("device", "")
         self.declare_parameter("sync_queue_size", 10)
@@ -56,6 +61,13 @@ class VisionNode(Node):
         self.declare_parameter("path_left_ratio", 0.20)
         self.declare_parameter("path_right_ratio", 0.80)
         self.declare_parameter("min_path_overlap_ratio", 0.15)
+        # Class-agnostic redundancy: near regions of the depth image that YOLO
+        # did not explain are reported as `depth_fallback_label` detections.
+        self.declare_parameter("depth_fallback_enabled", True)
+        self.declare_parameter("depth_fallback_max_m", 0.60)
+        self.declare_parameter("depth_fallback_stride", 8)
+        self.declare_parameter("depth_fallback_min_area_ratio", 0.02)
+        self.declare_parameter("depth_fallback_label", "unknown")
 
         model_name = str(self.get_parameter("model").value)
         self.confidence = float(self.get_parameter("confidence").value)
@@ -82,6 +94,14 @@ class VisionNode(Node):
         self.min_path_overlap_ratio = float(
             self.get_parameter("min_path_overlap_ratio").value
         )
+
+        self.depth_fallback_enabled = bool(self.get_parameter("depth_fallback_enabled").value)
+        self.depth_fallback_max_m = float(self.get_parameter("depth_fallback_max_m").value)
+        self.depth_fallback_stride = int(self.get_parameter("depth_fallback_stride").value)
+        self.depth_fallback_min_area_ratio = float(
+            self.get_parameter("depth_fallback_min_area_ratio").value
+        )
+        self.depth_fallback_label = str(self.get_parameter("depth_fallback_label").value)
 
         if not 0.0 <= self.depth_roi_margin_ratio < 0.5:
             raise ValueError("depth_roi_margin_ratio must be in [0.0, 0.5)")
@@ -159,6 +179,7 @@ class VisionNode(Node):
 
     def rgb_depth_callback(self, rgb_message: Image, depth_message: Image) -> None:
         """Process one approximately time-synchronized RGB/depth pair."""
+        callback_start = time.perf_counter()
         try:
             image = self.bridge.imgmsg_to_cv2(rgb_message, desired_encoding="bgr8")
             depth = self.bridge.imgmsg_to_cv2(
@@ -182,6 +203,7 @@ class VisionNode(Node):
                 )
                 self.warned_camera_mismatch = True
 
+        inference_start = time.perf_counter()
         result = self.model.predict(
             source=image,
             conf=self.confidence,
@@ -189,6 +211,7 @@ class VisionNode(Node):
             device=self.device,
             verbose=False,
         )[0]
+        inference_ms = (time.perf_counter() - inference_start) * 1e3
         annotated = result.plot(show=False)
 
         image_stamp_ns = (
@@ -208,6 +231,41 @@ class VisionNode(Node):
         obstacle_now = False
         image_height, image_width = image.shape[:2]
 
+        def add_detection(label, confidence, x1, y1, x2, y2, distance_m, source, extra=None):
+            nonlocal nearest_distance, nearest_lateral, obstacle_now
+            bbox_width = max(x2 - x1, 1.0)
+            center_x = 0.5 * (x1 + x2)
+            lateral_offset = (center_x / max(float(image_width), 1.0)) - 0.5
+            path_left_px = self.path_left_ratio * image_width
+            path_right_px = self.path_right_ratio * image_width
+            overlap_px = max(0.0, min(x2, path_right_px) - max(x1, path_left_px))
+            overlap_ratio = min(max(overlap_px / bbox_width, 0.0), 1.0)
+            in_path = overlap_ratio >= self.min_path_overlap_ratio
+            is_close = (
+                math.isfinite(distance_m)
+                and distance_m <= self.stop_distance_m
+                and depth_is_fresh
+            )
+            detections.append(
+                {
+                    "class": label,
+                    "source": source,
+                    "confidence": round(float(confidence), 4),
+                    "bbox_xyxy": [round(v, 1) for v in (x1, y1, x2, y2)],
+                    "lateral_offset": round(float(lateral_offset), 4),
+                    "distance_m": None if not math.isfinite(distance_m) else round(distance_m, 3),
+                    "path_overlap_ratio": round(float(overlap_ratio), 4),
+                    "in_path": bool(in_path),
+                    "close": bool(is_close),
+                    **(extra or {}),
+                }
+            )
+            if math.isfinite(distance_m) and distance_m < nearest_distance:
+                nearest_distance = distance_m
+                nearest_lateral = lateral_offset
+            if in_path and is_close:
+                obstacle_now = True
+
         if result.boxes is not None and len(result.boxes) > 0:
             boxes = result.boxes.xyxy.cpu().numpy()
             confidences = result.boxes.conf.cpu().numpy()
@@ -226,9 +284,6 @@ class VisionNode(Node):
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                bbox_width = max(x2 - x1, 1.0)
-                center_x = 0.5 * (x1 + x2)
-                lateral_offset = (center_x / max(float(image_width), 1.0)) - 0.5
                 distance_m = self._estimate_depth(
                     x1,
                     y1,
@@ -239,43 +294,55 @@ class VisionNode(Node):
                     depth,
                     str(depth_message.encoding),
                 )
+                add_detection(label, confidence, x1, y1, x2, y2, distance_m, "yolo")
 
-                path_left_px = self.path_left_ratio * image_width
-                path_right_px = self.path_right_ratio * image_width
-                overlap_px = max(
-                    0.0,
-                    min(x2, path_right_px) - max(x1, path_left_px),
+        if self.depth_fallback_enabled and depth_is_fresh and depth is not None and depth.ndim >= 2:
+            depth_height, depth_width = depth.shape[:2]
+            scale_x = depth_width / max(float(image_width), 1.0)
+            scale_y = depth_height / max(float(image_height), 1.0)
+            depth_m = depth.astype(np.float32)
+            if str(depth_message.encoding).upper() in {"16UC1", "MONO16"} or depth.dtype == np.uint16:
+                depth_m = depth_m * 0.001
+            exclude = [
+                (d["bbox_xyxy"][0] * scale_x, d["bbox_xyxy"][1] * scale_y,
+                 d["bbox_xyxy"][2] * scale_x, d["bbox_xyxy"][3] * scale_y)
+                for d in detections
+            ]
+            for blob in find_near_blobs(
+                depth_m,
+                max_range_m=self.depth_fallback_max_m,
+                min_range_m=self.depth_min_m,
+                stride=self.depth_fallback_stride,
+                min_area_ratio=self.depth_fallback_min_area_ratio,
+                percentile=self.depth_percentile,
+                exclude_boxes=exclude,
+            ):
+                bx1, by1, bx2, by2 = blob.bbox_xyxy
+                add_detection(
+                    self.depth_fallback_label,
+                    1.0,
+                    bx1 / scale_x,
+                    by1 / scale_y,
+                    bx2 / scale_x,
+                    by2 / scale_y,
+                    blob.distance_m,
+                    "depth",
+                    {
+                        "anchor_uv": [round(blob.anchor_uv[0] / scale_x, 1), round(blob.anchor_uv[1] / scale_y, 1)],
+                        "anchor_depth_m": round(blob.anchor_depth_m, 3),
+                    },
                 )
-                overlap_ratio = min(max(overlap_px / bbox_width, 0.0), 1.0)
-                in_path = overlap_ratio >= self.min_path_overlap_ratio
-
-                is_close = (
-                    math.isfinite(distance_m)
-                    and distance_m <= self.stop_distance_m
-                    and depth_is_fresh
+                top_left = (int(bx1 / scale_x), int(by1 / scale_y))
+                annotated = np.ascontiguousarray(annotated)
+                cv2.rectangle(
+                    annotated, top_left, (int(bx2 / scale_x) - 1, int(by2 / scale_y) - 1),
+                    (0, 165, 255), 2,
                 )
-                if not self.require_depth and not math.isfinite(distance_m):
-                    is_close = False
-
-                detection = {
-                    "class": label,
-                    "confidence": round(float(confidence), 4),
-                    "bbox_xyxy": [round(v, 1) for v in (x1, y1, x2, y2)],
-                    "lateral_offset": round(float(lateral_offset), 4),
-                    "distance_m": None
-                    if not math.isfinite(distance_m)
-                    else round(distance_m, 3),
-                    "path_overlap_ratio": round(float(overlap_ratio), 4),
-                    "in_path": bool(in_path),
-                    "close": bool(is_close),
-                }
-                detections.append(detection)
-
-                if math.isfinite(distance_m) and distance_m < nearest_distance:
-                    nearest_distance = distance_m
-                    nearest_lateral = lateral_offset
-                if in_path and is_close:
-                    obstacle_now = True
+                cv2.putText(
+                    annotated, f"{self.depth_fallback_label} {blob.distance_m:.2f}m",
+                    (top_left[0] + 4, top_left[1] + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (0, 165, 255), 2,
+                )
 
         if self.require_depth and not depth_is_fresh:
             obstacle_now = False
@@ -289,6 +356,7 @@ class VisionNode(Node):
             )
         )
         self.lateral_pub.publish(Float32(data=float(nearest_lateral)))
+        now_ns = self.get_clock().now().nanoseconds
         self.detections_pub.publish(
             String(
                 data=json.dumps(
@@ -297,6 +365,10 @@ class VisionNode(Node):
                         "depth_fresh": depth_is_fresh,
                         "sync_delta_s": round(sync_delta_s, 6),
                         "obstacle": obstacle_now,
+                        "inference_ms": round(inference_ms, 2),
+                        "processing_ms": round((time.perf_counter() - callback_start) * 1e3, 2),
+                        # image capture -> publication, in ROS (sim) time
+                        "age_s": round((now_ns - image_stamp_ns) / 1e9, 4),
                         "detections": detections,
                     }
                 )

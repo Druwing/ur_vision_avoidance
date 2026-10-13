@@ -1,0 +1,20 @@
+# Ground truth of worlds/obstacle_world.sdf, used by metrics_node and
+# dataset_capture_node. Frame: base_link (the robot is spawned at the world
+# origin, so world == base_link). Obstacles are axis-aligned boxes.
+# `label`: class the detector is expected to report; `class_name`: class used in
+# the captured dataset and in scripts/benchmark_yolo.py.
+# Keep in sync with the world file whenever an obstacle moves.
+frame: base_link
+obstacles:
+  - name: box_obstacle
+    label: unknown          # not a COCO class: seen only by the depth fallback
+    class_name: box         # dataset class (YOLO labels, benchmark)
+    center_m: [0.63, -0.09, 0.37]
+    size_m: [0.10, 0.10, 0.10]
+  - name: chair_obstacle
+    label: chair
+    class_name: chair
+    # Fuel OpenRobotics/Chair v3 mesh bounds (scale 0.00817, link yaw +90 deg)
+    # placed at (0.65, -1.10, 0.0, yaw 0): x [0.352, 0.865], y [-1.389, -0.811], z [0, 0.817]
+    center_m: [0.6085, -1.10, 0.4085]
+    size_m: [0.513, 0.578, 0.817]
